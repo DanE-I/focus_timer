@@ -1,17 +1,11 @@
-# focus_timer
+# Focus Timer
 
-A new Flutter project.
+A lightweight Pomodoro timer for macOS and iOS, built with Flutter.
 
-## Getting Started
+- Focus, short-break, and long-break timers with editable durations (1–180 minutes).
+- Start, pause, and reset controls with automatic break/focus transitions.
+- Daily completed-focus count and locally stored session history.
+- Timer mode, durations, daily count, and history are saved with SharedPreferences.
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Run the app with `flutter run -d macos` or select an iOS Simulator in Flutter.
+Run widget tests with `flutter test`.

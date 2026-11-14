@@ -1,30 +1,56 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
-
+import 'package:flutter_test/flutter_test.dart';
 import 'package:focus_timer/main.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  testWidgets('starts with the default focus timer and supports pause/reset', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const FocusTimerApp());
+    await tester.pumpAndSettle();
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    expect(find.text('25:00'), findsOneWidget);
+    expect(find.text('0 sessions completed today'), findsOneWidget);
+
+    await tester.tap(find.text('Short'));
+    await tester.pumpAndSettle();
+    expect(find.text('05:00'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Start'));
+    await tester.tap(find.text('Start'));
     await tester.pump();
+    expect(find.text('Pause'), findsOneWidget);
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    await tester.tap(find.text('Pause'));
+    await tester.pump();
+    expect(find.text('Start'), findsOneWidget);
+
+    await tester.tap(find.text('Reset'));
+    await tester.pump();
+    expect(find.text('05:00'), findsOneWidget);
+  });
+
+  testWidgets('saves custom timer durations', (tester) async {
+    await tester.pumpWidget(const FocusTimerApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Timer settings'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextFormField).first, '30');
+    await tester.ensureVisible(find.text('Save'));
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('30:00'), findsOneWidget);
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.getString('timer.durations'),
+      '{"focus":30,"shortBreak":5,"longBreak":15}',
+    );
   });
 }
