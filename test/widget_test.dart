@@ -53,4 +53,48 @@ void main() {
       '{"focus":30,"shortBreak":5,"longBreak":15}',
     );
   });
+
+  testWidgets('catches up sessions completed while the app was suspended', (
+    tester,
+  ) async {
+    final now = DateTime.now();
+    final today =
+        '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    SharedPreferences.setMockInitialValues({
+      'timer.mode': 'focus',
+      'timer.running': true,
+      'timer.deadline': now
+          .subtract(const Duration(seconds: 25))
+          .millisecondsSinceEpoch,
+      'sessions.today': 0,
+      'sessions.date': today,
+      'sessions.history': '[]',
+    });
+
+    await tester.pumpWidget(const FocusTimerApp());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Short break'), findsOneWidget);
+    expect(find.text('1 session completed today'), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getBool('timer.running'), isTrue);
+    final restoredDeadline = DateTime.fromMillisecondsSinceEpoch(
+      preferences.getInt('timer.deadline')!,
+    );
+    expect(restoredDeadline.isAfter(DateTime.now()), isTrue);
+    expect(
+      restoredDeadline.isBefore(
+        DateTime.now().add(const Duration(seconds: 285)),
+      ),
+      isTrue,
+    );
+    expect(
+      preferences.getString('sessions.history'),
+      contains('"mode":"focus"'),
+    );
+  });
 }

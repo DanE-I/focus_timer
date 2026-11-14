@@ -60,12 +60,15 @@ class TimerPage extends StatefulWidget {
   State<TimerPage> createState() => _TimerPageState();
 }
 
-class _TimerPageState extends State<TimerPage> {
+class _TimerPageState extends State<TimerPage> with WidgetsBindingObserver {
   static const _modePreference = 'timer.mode';
   static const _durationPreference = 'timer.durations';
   static const _sessionsPreference = 'sessions.today';
   static const _sessionsDatePreference = 'sessions.date';
   static const _historyPreference = 'sessions.history';
+  static const _runningPreference = 'timer.running';
+  static const _remainingPreference = 'timer.remainingSeconds';
+  static const _deadlinePreference = 'timer.deadline';
 
   static const _defaultDurations = <TimerMode, int>{
     TimerMode.focus: 25,
@@ -85,17 +88,27 @@ class _TimerPageState extends State<TimerPage> {
   String? _storageError;
   bool _ready = false;
   bool _running = false;
+  bool _advancing = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadPreferences();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _ready && _running) {
+      _tick();
+    }
   }
 
   static String _dateKey(DateTime date) =>
@@ -153,7 +166,21 @@ class _TimerPageState extends State<TimerPage> {
       _sessionsToday = savedDate == _today
           ? preferences.getInt(_sessionsPreference) ?? 0
           : 0;
-      _remaining = _durationFor(_mode);
+      final savedRunning = preferences.getBool(_runningPreference) ?? false;
+      final savedDeadline = preferences.getInt(_deadlinePreference);
+      if (savedRunning && savedDeadline != null) {
+        _running = true;
+        _deadline = DateTime.fromMillisecondsSinceEpoch(savedDeadline);
+        _remaining = _deadline!.difference(DateTime.now());
+        if (_remaining.isNegative) _remaining = Duration.zero;
+      } else {
+        final savedSeconds = preferences.getInt(_remainingPreference);
+        _remaining = savedSeconds == null
+            ? _durationFor(_mode)
+            : Duration(seconds: math.max(0, savedSeconds));
+        _running = false;
+        _deadline = null;
+      }
       if (savedDate != _today) {
         await _writePreference(
           preferences.setString(_sessionsDatePreference, _today),
@@ -169,6 +196,10 @@ class _TimerPageState extends State<TimerPage> {
     } finally {
       if (mounted) {
         setState(() => _ready = true);
+        if (_running) {
+          _startTicker();
+          _tick();
+        }
       }
     }
   }
@@ -194,13 +225,6 @@ class _TimerPageState extends State<TimerPage> {
   Future<void> _selectMode(TimerMode mode) async {
     if (!_ready || mode == _mode) return;
     try {
-      final preferences = _preferences;
-      if (preferences != null) {
-        await _writePreference(
-          preferences.setString(_modePreference, mode.storageKey),
-          _modePreference,
-        );
-      }
       _ticker?.cancel();
       setState(() {
         _mode = mode;
@@ -208,138 +232,177 @@ class _TimerPageState extends State<TimerPage> {
         _running = false;
         _deadline = null;
       });
+      await _persistTimerState();
     } catch (error) {
       _reportStorageError(error);
     }
   }
 
-  void _toggleTimer() {
+  Future<void> _toggleTimer() async {
     if (!_ready) return;
-    if (_running) {
+    try {
+      if (_running) {
+        if (_deadline!.compareTo(DateTime.now()) <= 0) {
+          await _tick();
+          return;
+        }
+        _ticker?.cancel();
+        setState(() {
+          _remaining = _deadline!.difference(DateTime.now());
+          if (_remaining.isNegative) _remaining = Duration.zero;
+          _running = false;
+          _deadline = null;
+        });
+      } else {
+        _deadline = DateTime.now().add(_remaining);
+        setState(() => _running = true);
+        _startTicker();
+      }
+      await _persistTimerState();
+    } catch (error) {
+      _reportStorageError(error);
+    }
+  }
+
+  Future<void> _resetTimer() async {
+    if (!_ready) return;
+    try {
       _ticker?.cancel();
       setState(() {
-        _remaining = _deadline!.difference(DateTime.now());
-        if (_remaining.isNegative) _remaining = Duration.zero;
         _running = false;
         _deadline = null;
+        _remaining = _durationFor(_mode);
       });
-      return;
+      await _persistTimerState();
+    } catch (error) {
+      _reportStorageError(error);
     }
+  }
 
-    _deadline = DateTime.now().add(_remaining);
-    setState(() => _running = true);
+  void _startTicker() {
+    _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
-  void _resetTimer() {
-    if (!_ready) return;
-    _ticker?.cancel();
-    setState(() {
-      _running = false;
-      _deadline = null;
-      _remaining = _durationFor(_mode);
-    });
-  }
-
-  void _tick() {
-    final deadline = _deadline;
-    if (!_running || deadline == null) return;
-    final remaining = deadline.difference(DateTime.now());
-    if (remaining <= Duration.zero) {
-      _ticker?.cancel();
-      _ticker = null;
-      setState(() {
-        _remaining = Duration.zero;
-        _running = false;
-      });
-      _completeSession();
+  Future<void> _tick() async {
+    if (!_running || _deadline == null || _advancing) return;
+    final remaining = _deadline!.difference(DateTime.now());
+    if (remaining > Duration.zero) {
+      if (remaining.inSeconds != _remaining.inSeconds) {
+        setState(() => _remaining = remaining);
+      }
       return;
     }
-    setState(() => _remaining = remaining);
+
+    _advancing = true;
+    _ticker?.cancel();
+    _ticker = null;
+    try {
+      while (_running &&
+          _deadline != null &&
+          !_deadline!.isAfter(DateTime.now())) {
+        await _completeSession(completedAt: _deadline!);
+      }
+      if (_running && _deadline != null) {
+        _remaining = _deadline!.difference(DateTime.now());
+        _startTicker();
+        if (mounted) setState(() {});
+      }
+    } finally {
+      _advancing = false;
+    }
   }
 
-  Future<void> _completeSession() async {
+  Future<void> _persistTimerState() async {
+    final preferences = _preferences;
+    if (preferences == null) return;
+    final seconds = _running && _deadline != null
+        ? _deadline!.difference(DateTime.now()).inSeconds
+        : _remaining.inSeconds;
+    await _writePreference(
+      preferences.setBool(_runningPreference, _running),
+      _runningPreference,
+    );
+    await _writePreference(
+      preferences.setInt(_remainingPreference, math.max(0, seconds)),
+      _remainingPreference,
+    );
+    if (_running && _deadline != null) {
+      await _writePreference(
+        preferences.setInt(
+          _deadlinePreference,
+          _deadline!.millisecondsSinceEpoch,
+        ),
+        _deadlinePreference,
+      );
+    } else {
+      await _writePreference(
+        preferences.remove(_deadlinePreference),
+        _deadlinePreference,
+      );
+    }
+    await _writePreference(
+      preferences.setString(_modePreference, _mode.storageKey),
+      _modePreference,
+    );
+  }
+
+  Future<void> _completeSession({required DateTime completedAt}) async {
     final completedMode = _mode;
     final preferences = _preferences;
     var updatedSessionsToday = _sessionsToday;
+    var updatedToday = _today;
     var nextMode = TimerMode.focus;
     final updatedHistory = List<Map<String, dynamic>>.of(_history);
 
     if (completedMode == TimerMode.focus) {
-      final currentDate = _dateKey(DateTime.now());
-      updatedSessionsToday = currentDate == _today ? _sessionsToday + 1 : 1;
-      updatedHistory.add({
-        'mode': completedMode.storageKey,
-        'completedAt': DateTime.now().toIso8601String(),
-      });
-      nextMode = updatedSessionsToday % 4 == 0
+      final completionDate = _dateKey(completedAt);
+      if (completionDate == _today) {
+        updatedSessionsToday++;
+      } else if (completionDate.compareTo(_today) > 0) {
+        updatedToday = completionDate;
+        updatedSessionsToday = 1;
+      }
+      nextMode = updatedSessionsToday > 0 && updatedSessionsToday % 4 == 0
           ? TimerMode.longBreak
           : TimerMode.shortBreak;
-      if (preferences != null) {
-        try {
-          await _writePreference(
-            preferences.setString(_sessionsDatePreference, currentDate),
-            _sessionsDatePreference,
-          );
-          await _writePreference(
-            preferences.setInt(_sessionsPreference, updatedSessionsToday),
-            _sessionsPreference,
-          );
-          await _writePreference(
-            preferences.setString(
-              _historyPreference,
-              jsonEncode(updatedHistory),
-            ),
-            _historyPreference,
-          );
-          await _writePreference(
-            preferences.setString(_modePreference, nextMode.storageKey),
-            _modePreference,
-          );
-        } catch (error) {
-          _reportStorageError(error);
-          return;
-        }
-      }
-      _today = currentDate;
-    } else {
-      updatedHistory.add({
-        'mode': completedMode.storageKey,
-        'completedAt': DateTime.now().toIso8601String(),
-      });
-      nextMode = TimerMode.focus;
-      if (preferences != null) {
-        try {
-          await _writePreference(
-            preferences.setString(
-              _historyPreference,
-              jsonEncode(updatedHistory),
-            ),
-            _historyPreference,
-          );
-          await _writePreference(
-            preferences.setString(_modePreference, nextMode.storageKey),
-            _modePreference,
-          );
-        } catch (error) {
-          _reportStorageError(error);
-          return;
-        }
-      }
     }
 
-    if (!mounted) return;
-    setState(() {
-      _history
-        ..clear()
-        ..addAll(updatedHistory);
-      _sessionsToday = updatedSessionsToday;
-      _mode = nextMode;
-      _remaining = _durationFor(nextMode);
-      _running = true;
-      _deadline = DateTime.now().add(_remaining);
-      _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+    updatedHistory.add({
+      'mode': completedMode.storageKey,
+      'completedAt': completedAt.toIso8601String(),
     });
+
+    _today = updatedToday;
+    _sessionsToday = updatedSessionsToday;
+    _history
+      ..clear()
+      ..addAll(updatedHistory);
+    _mode = nextMode;
+    _remaining = _durationFor(nextMode);
+    _running = true;
+    _deadline = completedAt.add(_remaining);
+    if (mounted) setState(() {});
+
+    if (preferences != null) {
+      try {
+        await _writePreference(
+          preferences.setString(_historyPreference, jsonEncode(_history)),
+          _historyPreference,
+        );
+        await _writePreference(
+          preferences.setString(_sessionsDatePreference, _today),
+          _sessionsDatePreference,
+        );
+        await _writePreference(
+          preferences.setInt(_sessionsPreference, _sessionsToday),
+          _sessionsPreference,
+        );
+        await _persistTimerState();
+      } catch (error) {
+        _reportStorageError(error);
+      }
+    }
   }
 
   Future<void> _openSettings() async {
@@ -418,6 +481,7 @@ class _TimerPageState extends State<TimerPage> {
         _durations.addAll(updatedDurations);
         if (!_running) _remaining = _durationFor(_mode);
       });
+      if (!_running) await _persistTimerState();
     } catch (error) {
       _reportStorageError(error);
     }
